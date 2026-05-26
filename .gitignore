@@ -1,13 +1,7 @@
-node_modules/
-build/
-dist/
-*.o
-*.so
-*.dylib
-parser
+server/node_modules/
+*.log
 .DS_Store
 *.swp
 *.swo
-*~
 .vscode/
 .idea/

@@ -1,113 +1,76 @@
-# tree-sitter-arche
+# arche.nvim
 
-A Tree-sitter grammar for the [Arche](https://github.com/Truc4/arche) language.
+Syntax highlighting for the [Arche](https://github.com/Truc4/arche) language in
+Neovim — driven by the **arche compiler's own lossless CST**, so it always matches
+the language instead of drifting like a separately-maintained grammar.
 
-Provides syntax highlighting and parsing support for `.arche` files in Neovim, Emacs, and other editors that support Tree-sitter.
+It is a small LSP server that emits [semantic tokens](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#textDocument_semanticTokens),
+which Neovim renders natively. Types, fields, function calls, parameters and
+variables are distinguished because they come from arche's real concrete syntax
+tree, not from pattern guesses.
 
-## Features
+> Replaces the old tree-sitter grammar. See the design write-up in the arche repo:
+> `docs/LOSSLESS_CST.md`.
 
-- **Complete grammar** for Arche language (worlds, archetypes, procedures, systems, functions)
-- **Neovim highlighting** with semantic token groups
-- **Scope tracking** for variable binding and reference analysis
-- **Automatic indentation** for code blocks
-- **References to arche compiler** via git submodule for testing and grammar verification
+## How it works
 
-## Setup
+```
+arche source ─▶ arche-cst-tokens ─▶ arche.nvim LSP server ─▶ Neovim semantic tokens
+                (in the arche repo,    (server/, TypeScript)     (@lsp.type.* groups)
+                 walks the lossless CST)
+```
 
-### LazyVim
+`arche-cst-tokens` is built from the arche compiler and reuses its lexer + parser,
+so new keywords/constructs in the language flow through to highlighting with no
+changes here.
 
-Add to your plugins (e.g., `lua/plugins/treesitter.lua`):
+## Requirements
+
+- Neovim 0.10+ (built-in LSP semantic tokens)
+- `node` (runs the bundled server)
+- `arche-cst-tokens` on your `PATH` — build it from the arche repo:
+  ```sh
+  cd /path/to/arche && make build/arche-cst-tokens
+  # then put build/arche-cst-tokens on PATH, or pass tokens_path (see Setup)
+  ```
+
+## Install
+
+Build the server once (it ships as TypeScript):
+
+```sh
+cd arche.nvim/server && npm install && npm run build
+```
+
+Then with [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
-  "Truc4/tree-sitter-arche",
-  dependencies = "nvim-treesitter/nvim-treesitter"
+  "Truc4/arche.nvim",
+  build = "cd server && npm install && npm run build",
+  ft = "arche",
+  opts = {
+    -- tokens_path = "/path/to/arche/build/arche-cst-tokens", -- if not on PATH
+  },
 }
 ```
 
-LazyVim automatically clones, builds, and registers the parser. Open a `.arche` file and syntax highlighting works.
+Or any plugin manager — the plugin auto-starts on `arche` files.
 
-## Testing
+## Setup
 
-Run test suite:
-```bash
-npm test
-```
+`require("arche").setup{}` is called automatically with defaults. Re-call it to
+customise (idempotent):
 
-## Project Structure
+| option        | type    | default                        | meaning                                            |
+|---------------|---------|--------------------------------|----------------------------------------------------|
+| `tokens_path` | string  | `nil` (uses `arche-cst-tokens` on PATH) | path to the `arche-cst-tokens` binary    |
+| `cmd`         | table   | bundled `node server/out/server.js --stdio` | override the server launch command   |
+| `highlights`  | boolean | `true`                         | set default `@lsp.type.*` → highlight-group links  |
 
-```
-.
-├── grammar.js              # Tree-sitter grammar definition
-├── package.json            # npm configuration
-├── queries/
-│   ├── highlights.scm      # Syntax highlighting rules
-│   ├── locals.scm          # Scope and variable tracking
-│   └── indents.scm         # Indentation rules
-├── test/
-│   └── corpus/             # Test cases
-├── src/                    # Generated parser (created by tree-sitter generate)
-└── arche/                  # Git submodule: reference compiler + test fixtures
-```
+## Highlight groups
 
-## Language Reference
-
-**Declarations:**
-- `world` — declare a world with optional fields
-- `arche` / `archetype` — declare an archetype with meta and column fields
-- `proc` — procedure with statements
-- `sys` — system with parameters and statements
-- `func` — function with typed return
-- `extern proc` — external procedure declaration
-
-**Statements:**
-- `let` — variable binding
-- Assignment: `=`, `+=`, `-=`, `*=`, `/=`
-- `for...in` — iteration
-- `run...in` — system execution
-- `free` — deallocation
-
-**Expressions:**
-- Literals: numbers, strings
-- Identifiers and field access (`obj.field`)
-- Indexing (`arr[i, j]`)
-- Binary operators: `+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>`, `<=`, `>=`
-- Unary: `-`, `!`
-- Function calls: `func(args)`
-- Allocation: `Entity.alloc(field: value)`
-
-See [arche/docs/GRAMMAR.peg](arche/docs/GRAMMAR.peg) for full grammar specification.
-
-## Troubleshooting
-
-**Parser fails to install:**
-- Make sure `requires_generate_from_grammar` is **not** set (tree-sitter-cli generates on your machine, not from grammar.js)
-- Check `:TSCheckHealth` for errors
-
-**Highlighting not working:**
-- Verify filetype: `:set filetype?` should show `arche`
-- Check parser loaded: `:TSInstallInfo arche` should show status
-- Verify highlights loaded: `:set filetype=arche` then `:Inspect` on a keyword
-
-**"arche" is not a valid language:**
-- Parser not installed. Run `:TSInstall arche`
-- Or restart nvim after installing
-
-## Development
-
-The grammar (`grammar.js`) is derived from [`arche/docs/GRAMMAR.peg`](arche/docs/GRAMMAR.peg). The `arche/` submodule contains reference compiler, test fixtures, and the canonical grammar spec.
-
-To modify the grammar:
-
-```bash
-# Edit grammar.js
-vim grammar.js
-
-# Regenerate parser.c
-npm run build
-
-# Test (optional, corpus tests TBD)
-npm test
-```
-
-After changes, commit `grammar.js` and the generated files in `src/`.
+The server's semantic-token types map to: `@keyword`, `@string`, `@number`,
+`@comment`, `@operator`, `Delimiter` (punctuation), `@variable`, `@type`,
+`@property`, `@function`, `@variable.parameter`. All links are set with
+`default = true`, so your colorscheme wins.
