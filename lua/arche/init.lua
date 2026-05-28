@@ -1,14 +1,15 @@
--- arche.nvim — syntax highlighting for the Arche language.
+-- arche.nvim — editor support for the Arche language.
 --
--- Highlighting is driven by an LSP server (server/out/server.js) that emits
--- semantic tokens derived from the arche compiler's own lossless CST, via the
--- `arche-cst-tokens` binary. It therefore tracks the language automatically
--- instead of being a separately-maintained grammar.
+-- Driven by an LSP server (server/out/server.js) that relays to the arche
+-- compiler's warm analysis service (`arche-analyzer --serve`). It provides
+-- semantic-token highlighting and "explicit view" inlay hints (inferred types,
+-- type-alias backing, …) — both from the compiler's own CST + semantics, so they
+-- track the language instead of drifting like a separate grammar.
 --
 -- Requirements:
 --   * node (to run the bundled server)
---   * `arche-cst-tokens` on PATH, or pass `tokens_path` to setup().
---     Build it from the arche repo: `make build/arche-cst-tokens`.
+--   * `arche-analyzer` on PATH, or pass `analyzer_path` to setup().
+--     Build it from the arche repo: `make build/arche-analyzer`.
 
 local M = {}
 
@@ -22,9 +23,9 @@ local function default_cmd()
   return { "node", plugin_root() .. "/server/out/server.js", "--stdio" }
 end
 
--- Map the server's semantic-token types to highlight groups. Most standard
--- types Neovim auto-links; we set them all with `default = true` so themes and
--- user config still win, and so the non-standard `punctuation` type renders.
+-- Map the server's semantic-token types to highlight groups, and style inlay
+-- hints so the synthetic (implicit) text reads as not-real. All set with
+-- `default = true` so themes and user config still win.
 local function apply_highlights()
   local links = {
     keyword = "@keyword",
@@ -42,12 +43,34 @@ local function apply_highlights()
   for tok, group in pairs(links) do
     vim.api.nvim_set_hl(0, "@lsp.type." .. tok, { link = group, default = true })
   end
+  -- Inlay hints are virtual text (they never enter the buffer): dim + italic so
+  -- the "written-longhand" explicit view is clearly synthetic.
+  vim.api.nvim_set_hl(0, "LspInlayHint", { link = "Comment", default = true })
+  vim.api.nvim_set_hl(0, "@arche.implicit", { link = "LspInlayHint", default = true })
+end
+
+-- Enable inlay hints for a buffer across the nvim 0.10/0.11 API shapes.
+local function enable_inlay_hints(bufnr)
+  local ih = vim.lsp.inlay_hint
+  if not ih then
+    return
+  end
+  -- 0.10.0+: enable(enable, filter); older 0.10 nightly: enable(bufnr, enable).
+  local ok = pcall(function()
+    ih.enable(true, { bufnr = bufnr })
+  end)
+  if not ok then
+    pcall(function()
+      ih.enable(bufnr, true)
+    end)
+  end
 end
 
 -- opts:
---   cmd          (table)  override the server launch command
---   tokens_path  (string) path to the arche-cst-tokens binary (else server uses PATH)
---   highlights   (bool)   set default @lsp.type.* links (default true)
+--   cmd            (table)  override the server launch command
+--   analyzer_path  (string) path to the arche-analyzer binary (else server uses PATH)
+--   highlights     (bool)   set default @lsp.type.* + inlay-hint links (default true)
+--   inlay_hints    (bool)   enable inlay hints on attach (default true)
 function M.setup(opts)
   opts = opts or {}
 
@@ -56,7 +79,8 @@ function M.setup(opts)
   end
 
   local cmd = opts.cmd or default_cmd()
-  local init_options = opts.tokens_path and { tokensPath = opts.tokens_path } or nil
+  local init_options = opts.analyzer_path and { analyzerPath = opts.analyzer_path } or nil
+  local want_hints = opts.inlay_hints ~= false
 
   local group = vim.api.nvim_create_augroup("ArcheLsp", { clear = true })
   vim.api.nvim_create_autocmd("FileType", {
@@ -71,6 +95,9 @@ function M.setup(opts)
         cmd = cmd,
         root_dir = root,
         init_options = init_options,
+        on_attach = want_hints and function(_, bufnr)
+          enable_inlay_hints(bufnr)
+        end or nil,
       }, { bufnr = ev.buf })
     end,
   })
