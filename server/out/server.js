@@ -9138,6 +9138,9 @@ var documents = new import_node.TextDocuments(TextDocument);
 function uriToPath(uri) {
   return uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
 }
+function pathToUri(path) {
+  return "file://" + path.split("/").map(encodeURIComponent).join("/");
+}
 var Analyzer = class {
   constructor(cmd) {
     this.cmd = cmd;
@@ -9221,6 +9224,11 @@ var Analyzer = class {
     void this.request(`CLOSE ${path}
 `);
   }
+  /* kind ∈ def|type|impl|decl; line/col are 1-based (user coords). Returns the raw LOC lines. */
+  goto(kind, path, line, col) {
+    return this.request(`GOTO ${kind} ${line} ${col} ${path}
+`);
+  }
 };
 var analyzer;
 connection.onInitialize((params) => {
@@ -9234,29 +9242,83 @@ connection.onInitialize((params) => {
         legend: { tokenTypes: TOKEN_TYPES, tokenModifiers: [] },
         full: true
       },
-      inlayHintProvider: true
+      inlayHintProvider: true,
+      definitionProvider: true,
+      typeDefinitionProvider: true,
+      implementationProvider: true,
+      declarationProvider: true
     }
   };
 });
-function parseDiagLine(line) {
-  const parts = line.split(" ");
-  if (parts[0] !== "DIAG" || parts.length < 6) return null;
-  const lineNum = Number(parts[1]) - 1;
-  const colNum = Number(parts[2]) - 1;
-  const sev = parts[3] === "error" ? import_node.DiagnosticSeverity.Error : import_node.DiagnosticSeverity.Warning;
-  const name = parts[4];
-  const message = parts.slice(5).join(" ");
-  if (lineNum < 0 || colNum < 0) return null;
-  return {
-    range: {
-      start: { line: lineNum, character: colNum },
-      end: { line: lineNum, character: colNum + 1 }
-    },
-    severity: sev,
-    source: "arche",
-    code: name,
-    message
-  };
+async function resolveGoto(kind, params) {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return [];
+  const path = uriToPath(params.textDocument.uri);
+  await analyzer.update(path, doc.getText());
+  const line = params.position.line + 1;
+  const col = params.position.character + 1;
+  const locs = [];
+  for (const out of await analyzer.goto(kind, path, line, col)) {
+    const parts = out.split(" ");
+    if (parts[0] !== "LOC" || parts.length < 4) continue;
+    const tLine = Number(parts[1]) - 1;
+    const tCol = Number(parts[2]) - 1;
+    const tPath = parts.slice(3).join(" ");
+    if (tLine < 0 || tCol < 0) continue;
+    locs.push({
+      uri: pathToUri(tPath),
+      range: { start: { line: tLine, character: tCol }, end: { line: tLine, character: tCol } }
+    });
+  }
+  return locs;
+}
+connection.onDefinition((p) => resolveGoto("def", p));
+connection.onTypeDefinition((p) => resolveGoto("type", p));
+connection.onImplementation((p) => resolveGoto("impl", p));
+connection.onDeclaration((p) => resolveGoto("decl", p));
+function parseDiagLines(uri, lines) {
+  const diagnostics = [];
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].split(" ");
+    if (parts[0] !== "DIAG" || parts.length < 8) continue;
+    const lineNum = Number(parts[1]) - 1;
+    const colNum = Number(parts[2]) - 1;
+    const sev = parts[3] === "error" ? import_node.DiagnosticSeverity.Error : import_node.DiagnosticSeverity.Warning;
+    const code = parts[4];
+    const slug = parts[5];
+    const noteCount = Number(parts[6]);
+    const message = parts.slice(7).join(" ");
+    if (lineNum < 0 || colNum < 0 || !Number.isFinite(noteCount)) continue;
+    const related = [];
+    for (let n = 0; n < noteCount && i + 1 < lines.length; n++) {
+      const np = lines[++i].split(" ");
+      if (np[0] !== "NOTE" || np.length < 4) continue;
+      const nLine = Number(np[1]) - 1;
+      const nCol = Number(np[2]) - 1;
+      const nMsg = np.slice(3).join(" ");
+      if (nLine < 0 || nCol < 0) continue;
+      related.push({
+        location: {
+          uri,
+          range: { start: { line: nLine, character: nCol }, end: { line: nLine, character: nCol + 1 } }
+        },
+        message: nMsg
+      });
+    }
+    diagnostics.push({
+      range: {
+        start: { line: lineNum, character: colNum },
+        end: { line: lineNum, character: colNum + 1 }
+      },
+      severity: sev,
+      source: "arche",
+      code,
+      /* "E0001" etc. — stable forever */
+      message: `${message} [${slug}]`,
+      relatedInformation: related.length ? related : void 0
+    });
+  }
+  return diagnostics;
 }
 async function refreshDoc(uri) {
   const doc = documents.get(uri);
@@ -9264,12 +9326,7 @@ async function refreshDoc(uri) {
   const path = uriToPath(uri);
   await analyzer.update(path, doc.getText());
   const lines = await analyzer.diags(path);
-  const diagnostics = [];
-  for (const line of lines) {
-    const d = parseDiagLine(line);
-    if (d) diagnostics.push(d);
-  }
-  connection.sendDiagnostics({ uri, diagnostics });
+  connection.sendDiagnostics({ uri, diagnostics: parseDiagLines(uri, lines) });
 }
 documents.onDidOpen((e) => void refreshDoc(e.document.uri));
 documents.onDidChangeContent((e) => void refreshDoc(e.document.uri));

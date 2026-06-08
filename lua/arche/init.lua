@@ -49,6 +49,19 @@ local function apply_highlights()
   vim.api.nvim_set_hl(0, "@arche.implicit", { link = "LspInlayHint", default = true })
 end
 
+-- Buffer-local goto keymaps. The server advertises definition / type-definition / implementation /
+-- declaration providers (all backed by the compiler's real resolution), but the default LSP maps for
+-- these vary across nvim versions — bind them explicitly so `gd` & co. work everywhere.
+local function set_goto_keymaps(bufnr)
+  local map = function(lhs, fn, desc)
+    vim.keymap.set("n", lhs, fn, { buffer = bufnr, silent = true, desc = desc })
+  end
+  map("gd", vim.lsp.buf.definition, "Arche: goto definition")
+  map("gD", vim.lsp.buf.declaration, "Arche: goto declaration")
+  map("gy", vim.lsp.buf.type_definition, "Arche: goto type definition")
+  map("gri", vim.lsp.buf.implementation, "Arche: goto implementation")
+end
+
 -- Enable inlay hints for a buffer across the nvim 0.10/0.11 API shapes.
 local function enable_inlay_hints(bufnr)
   local ih = vim.lsp.inlay_hint
@@ -95,9 +108,12 @@ function M.setup(opts)
         cmd = cmd,
         root_dir = root,
         init_options = init_options,
-        on_attach = want_hints and function(_, bufnr)
-          enable_inlay_hints(bufnr)
-        end or nil,
+        on_attach = function(_, bufnr)
+          set_goto_keymaps(bufnr)
+          if want_hints then
+            enable_inlay_hints(bufnr)
+          end
+        end,
       }, { bufnr = ev.buf })
     end,
   })

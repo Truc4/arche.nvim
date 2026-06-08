@@ -25,10 +25,13 @@ import {
   InlayHintKind,
   DiagnosticSeverity,
   type Diagnostic,
+  type DiagnosticRelatedInformation,
   type InlayHint,
   type InitializeParams,
   type InitializeResult,
   type SemanticTokens,
+  type Location,
+  type TextDocumentPositionParams,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 
@@ -72,6 +75,12 @@ const documents = new TextDocuments(TextDocument);
  * opaque id (the analyzer falls back to cwd for module resolution). */
 function uriToPath(uri: string): string {
   return uri.startsWith("file://") ? decodeURIComponent(uri.slice(7)) : uri;
+}
+
+/* Filesystem path → file:// URI. The analyzer reports target paths (the open file, a `use` module,
+ * core.arche) as plain filesystem paths; goto results need them back as URIs the client can open. */
+function pathToUri(path: string): string {
+  return "file://" + path.split("/").map(encodeURIComponent).join("/");
 }
 
 /*
@@ -164,6 +173,10 @@ class Analyzer {
   close(path: string): void {
     void this.request(`CLOSE ${path}\n`);
   }
+  /* kind ∈ def|type|impl|decl; line/col are 1-based (user coords). Returns the raw LOC lines. */
+  goto(kind: string, path: string, line: number, col: number): Promise<string[]> {
+    return this.request(`GOTO ${kind} ${line} ${col} ${path}\n`);
+  }
 }
 
 let analyzer: Analyzer;
@@ -181,33 +194,103 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
         full: true,
       },
       inlayHintProvider: true,
+      definitionProvider: true,
+      typeDefinitionProvider: true,
+      implementationProvider: true,
+      declarationProvider: true,
     },
   };
 });
 
-/* Convert one "DIAG line col severity name msg…" line into an LSP Diagnostic.
- * The range is a single-character span at the reported position — enough for
- * nvim to anchor the message; better widths can come once we surface token
- * lengths through the protocol. */
-function parseDiagLine(line: string): Diagnostic | null {
-  const parts = line.split(" ");
-  if (parts[0] !== "DIAG" || parts.length < 6) return null;
-  const lineNum = Number(parts[1]) - 1;
-  const colNum = Number(parts[2]) - 1;
-  const sev = parts[3] === "error" ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning;
-  const name = parts[4];
-  const message = parts.slice(5).join(" ");
-  if (lineNum < 0 || colNum < 0) return null;
-  return {
-    range: {
-      start: { line: lineNum, character: colNum },
-      end: { line: lineNum, character: colNum + 1 },
-    },
-    severity: sev,
-    source: "arche",
-    code: name,
-    message,
-  };
+/* Goto navigation. The analyzer runs the compiler's own resolution (DefId / interned-type / @drop
+ * channels) at the cursor and replies with `LOC <line> <col> <path>` per target — across files
+ * (a `use` module, core.arche) by construction. We translate LSP 0-based ↔ the analyzer's 1-based
+ * user coordinates and return real Locations, so Neovim's gd/gD/gri/go-to-type stop falling back to
+ * keyword text search. */
+async function resolveGoto(kind: string, params: TextDocumentPositionParams): Promise<Location[]> {
+  const doc = documents.get(params.textDocument.uri);
+  if (!doc) return [];
+  const path = uriToPath(params.textDocument.uri);
+  await analyzer.update(path, doc.getText()); /* keep the warm analysis current before querying */
+  const line = params.position.line + 1;
+  const col = params.position.character + 1;
+  const locs: Location[] = [];
+  for (const out of await analyzer.goto(kind, path, line, col)) {
+    const parts = out.split(" ");
+    if (parts[0] !== "LOC" || parts.length < 4) continue;
+    const tLine = Number(parts[1]) - 1;
+    const tCol = Number(parts[2]) - 1;
+    const tPath = parts.slice(3).join(" ");
+    if (tLine < 0 || tCol < 0) continue;
+    locs.push({
+      uri: pathToUri(tPath),
+      range: { start: { line: tLine, character: tCol }, end: { line: tLine, character: tCol } },
+    });
+  }
+  return locs;
+}
+
+connection.onDefinition((p) => resolveGoto("def", p));
+connection.onTypeDefinition((p) => resolveGoto("type", p));
+connection.onImplementation((p) => resolveGoto("impl", p));
+connection.onDeclaration((p) => resolveGoto("decl", p));
+
+/* Convert one DIAG response into LSP Diagnostics.
+ *
+ * Wire format (self-framing — `note_count` tells us exactly how many NOTE lines
+ * to consume after each DIAG, so partial reads or mid-emit crashes can't merge
+ * unrelated diagnostics):
+ *   DIAG <line> <col> <severity> <code> <slug> <note_count> <message>
+ *   NOTE <line> <col> <message>     × note_count
+ *
+ * The `code` (e.g. "E0001") becomes LSP `Diagnostic.code` — clickable in editors
+ * that surface it. NOTE lines become `relatedInformation`. The range is a single-
+ * character span at the reported position; better widths would require surfacing
+ * token lengths through the protocol. */
+function parseDiagLines(uri: string, lines: string[]): Diagnostic[] {
+  const diagnostics: Diagnostic[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].split(" ");
+    if (parts[0] !== "DIAG" || parts.length < 8) continue;
+    const lineNum = Number(parts[1]) - 1;
+    const colNum = Number(parts[2]) - 1;
+    const sev = parts[3] === "error" ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning;
+    const code = parts[4];
+    const slug = parts[5];
+    const noteCount = Number(parts[6]);
+    const message = parts.slice(7).join(" ");
+    if (lineNum < 0 || colNum < 0 || !Number.isFinite(noteCount)) continue;
+
+    const related: DiagnosticRelatedInformation[] = [];
+    for (let n = 0; n < noteCount && i + 1 < lines.length; n++) {
+      const np = lines[++i].split(" ");
+      if (np[0] !== "NOTE" || np.length < 4) continue;
+      const nLine = Number(np[1]) - 1;
+      const nCol = Number(np[2]) - 1;
+      const nMsg = np.slice(3).join(" ");
+      if (nLine < 0 || nCol < 0) continue;
+      related.push({
+        location: {
+          uri,
+          range: { start: { line: nLine, character: nCol }, end: { line: nLine, character: nCol + 1 } },
+        },
+        message: nMsg,
+      });
+    }
+
+    diagnostics.push({
+      range: {
+        start: { line: lineNum, character: colNum },
+        end: { line: lineNum, character: colNum + 1 },
+      },
+      severity: sev,
+      source: "arche",
+      code, /* "E0001" etc. — stable forever */
+      message: `${message} [${slug}]`,
+      relatedInformation: related.length ? related : undefined,
+    });
+  }
+  return diagnostics;
 }
 
 /* Re-analyze a document and republish its diagnostics. The UPDATE and DIAG
@@ -219,12 +302,7 @@ async function refreshDoc(uri: string): Promise<void> {
   const path = uriToPath(uri);
   await analyzer.update(path, doc.getText());
   const lines = await analyzer.diags(path);
-  const diagnostics: Diagnostic[] = [];
-  for (const line of lines) {
-    const d = parseDiagLine(line);
-    if (d) diagnostics.push(d);
-  }
-  connection.sendDiagnostics({ uri, diagnostics });
+  connection.sendDiagnostics({ uri, diagnostics: parseDiagLines(uri, lines) });
 }
 
 documents.onDidOpen((e) => void refreshDoc(e.document.uri));
