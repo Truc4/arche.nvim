@@ -9116,7 +9116,8 @@ var CATEGORY_TO_TYPE = {
   type: "type",
   property: "property",
   function: "function",
-  parameter: "parameter"
+  parameter: "parameter",
+  decorator: "decorator"
 };
 var TOKEN_TYPES = [
   "keyword",
@@ -9129,7 +9130,8 @@ var TOKEN_TYPES = [
   "type",
   "property",
   "function",
-  "parameter"
+  "parameter",
+  "decorator"
 ];
 var TOKEN_TYPE_INDEX = new Map(TOKEN_TYPES.map((t, i) => [t, i]));
 var FALLBACK_TYPE_INDEX = TOKEN_TYPE_INDEX.get("variable");

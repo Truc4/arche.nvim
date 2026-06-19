@@ -49,6 +49,7 @@ const CATEGORY_TO_TYPE: Record<string, string> = {
   property: "property",
   function: "function",
   parameter: "parameter",
+  decorator: "decorator",
 };
 
 const TOKEN_TYPES: string[] = [
@@ -63,6 +64,7 @@ const TOKEN_TYPES: string[] = [
   "property",
   "function",
   "parameter",
+  "decorator",
 ];
 const TOKEN_TYPE_INDEX = new Map(TOKEN_TYPES.map((t, i) => [t, i]));
 const FALLBACK_TYPE_INDEX = TOKEN_TYPE_INDEX.get("variable")!;
