@@ -39,6 +39,7 @@ local function apply_highlights()
     property = "@property",
     ["function"] = "@function",
     parameter = "@variable.parameter",
+    decorator = "@attribute",
   }
   for tok, group in pairs(links) do
     vim.api.nvim_set_hl(0, "@lsp.type." .. tok, { link = group, default = true })
